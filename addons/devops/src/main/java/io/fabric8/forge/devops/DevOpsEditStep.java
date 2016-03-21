@@ -341,7 +341,7 @@ public class DevOpsEditStep extends AbstractDevOpsCommand implements UIWizardSte
                     environmentMap.put("Current", namespace);
                 } else {
                     for (String environment : environments) {
-                        String envNamespace = buildName + "-" + environment.toLowerCase();
+                        String envNamespace = namespace + "-" + environment.toLowerCase();
                         environmentMap.put(environment, envNamespace);
                     }
                 }
@@ -349,7 +349,7 @@ public class DevOpsEditStep extends AbstractDevOpsCommand implements UIWizardSte
             }
         }
         LOG.info("Configured project " + buildName + " environments: " + config.getEnvironments());
-        ProjectConfigs.defaultEnvironments(config);
+        ProjectConfigs.defaultEnvironments(config, namespace);
 
         String projectName = config.getBuildName();
         if (Strings.isNullOrBlank(projectName)) {
