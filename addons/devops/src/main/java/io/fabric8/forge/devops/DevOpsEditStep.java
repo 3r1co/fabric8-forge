@@ -293,7 +293,9 @@ public class DevOpsEditStep extends AbstractDevOpsCommand implements UIWizardSte
         Object object = attributeMap.get(Project.class);
         String user = getStringAttribute(attributeMap, "gitUser");
         String named = getStringAttribute(attributeMap, "projectName");
-        ;
+
+        boolean isMercurialProject = Boolean.valueOf(getStringAttribute(attributeMap, "hg"));
+        
         File basedir = CommandHelpers.getBaseDir(project);
         if (basedir == null && configFile != null) {
             basedir = configFile.getParentFile();

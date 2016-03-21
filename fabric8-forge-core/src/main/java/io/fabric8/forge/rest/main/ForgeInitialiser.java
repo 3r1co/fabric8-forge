@@ -68,6 +68,7 @@ public class ForgeInitialiser {
     }
 
     public void preloadCommands(CommandsResource commandsResource)  {
+    	LOG.info("Loading from GTO specific Forge");
         LOG.info("Preloading commands");
         List<CommandInfoDTO> commands = Collections.EMPTY_LIST;
         try {

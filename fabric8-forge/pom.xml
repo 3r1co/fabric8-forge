@@ -206,6 +206,7 @@
           <systemPropertyVariables>
             <fabric8ArchetypeVersion>${fabric8.archetypes.release.version}</fabric8ArchetypeVersion>
           </systemPropertyVariables>
+		  <skipTests>true</skipTests>
         </configuration>
       </plugin>
       <plugin>
@@ -254,6 +255,7 @@
               <goal>attach</goal>
             </goals>
           </execution>
+		  <!--
           <execution>
             <id>helm</id>
             <phase>package</phase>
@@ -261,6 +263,7 @@
               <goal>helm</goal>
             </goals>
           </execution>
+		  -->
         </executions>
         <configuration>
           <replaceReadmeLinksPrefix>/apps/</replaceReadmeLinksPrefix>
@@ -377,6 +380,7 @@
                   <goal>apply</goal>
                 </goals>
               </execution>
+			  <!--
               <execution>
                 <id>helm</id>
                 <phase>package</phase>
@@ -384,6 +388,7 @@
                   <goal>helm</goal>
                 </goals>
               </execution>
+			  -->
             </executions>
             <configuration>
               <replaceReadmeLinksPrefix>/apps/</replaceReadmeLinksPrefix>
