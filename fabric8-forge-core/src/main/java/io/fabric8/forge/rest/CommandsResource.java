@@ -15,6 +15,8 @@
  */
 package io.fabric8.forge.rest;
 
+import static io.fabric8.forge.rest.Constants.PROJECT_NEW_COMMAND;
+import static io.fabric8.forge.rest.Constants.TARGET_LOCATION_PROPERTY;
 import io.fabric8.forge.rest.dto.CommandInfoDTO;
 import io.fabric8.forge.rest.dto.CommandInputDTO;
 import io.fabric8.forge.rest.dto.ExecutionRequest;
@@ -27,17 +29,45 @@ import io.fabric8.forge.rest.git.GitLockManager;
 import io.fabric8.forge.rest.git.GitOperation;
 import io.fabric8.forge.rest.git.RepositoriesResource;
 import io.fabric8.forge.rest.git.RepositoryResource;
+import io.fabric8.forge.rest.hg.HgOperation;
 import io.fabric8.forge.rest.hooks.CommandCompletePostProcessor;
 import io.fabric8.forge.rest.main.GitUserHelper;
 import io.fabric8.forge.rest.main.ProjectFileSystem;
 import io.fabric8.forge.rest.main.RepositoryCache;
 import io.fabric8.forge.rest.main.UserDetails;
+import io.fabric8.forge.rest.scm.SCM;
+import io.fabric8.forge.rest.scm.SCMType;
 import io.fabric8.forge.rest.ui.RestUIContext;
 import io.fabric8.forge.rest.ui.RestUIFunction;
 import io.fabric8.forge.rest.ui.RestUIRuntime;
 import io.fabric8.kubernetes.client.KubernetesClient;
 import io.fabric8.utils.Objects;
 import io.fabric8.utils.Strings;
+
+import java.io.File;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
+import javax.ejb.Stateless;
+import javax.inject.Inject;
+import javax.servlet.http.HttpServletRequest;
+import javax.ws.rs.Consumes;
+import javax.ws.rs.GET;
+import javax.ws.rs.NotFoundException;
+import javax.ws.rs.POST;
+import javax.ws.rs.Path;
+import javax.ws.rs.PathParam;
+import javax.ws.rs.Produces;
+import javax.ws.rs.core.Context;
+import javax.ws.rs.core.MediaType;
+import javax.ws.rs.core.Response;
+import javax.ws.rs.core.Response.Status;
+
+import org.apache.commons.lang3.StringUtils;
 import org.eclipse.jgit.api.Git;
 import org.eclipse.jgit.lib.Repository;
 import org.jboss.forge.addon.convert.ConverterFactory;
@@ -56,29 +86,8 @@ import org.jboss.forge.furnace.services.Imported;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import javax.ejb.Stateless;
-import javax.inject.Inject;
-import javax.servlet.http.HttpServletRequest;
-import javax.ws.rs.Consumes;
-import javax.ws.rs.GET;
-import javax.ws.rs.NotFoundException;
-import javax.ws.rs.POST;
-import javax.ws.rs.Path;
-import javax.ws.rs.PathParam;
-import javax.ws.rs.Produces;
-import javax.ws.rs.core.Context;
-import javax.ws.rs.core.MediaType;
-import javax.ws.rs.core.Response;
-import javax.ws.rs.core.Response.Status;
-import java.io.File;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
-
-import static io.fabric8.forge.rest.Constants.*;
+import com.aragost.javahg.BaseRepository;
+import com.aragost.javahg.RepositoryConfiguration;
 
 @Path("/api/forge")
 @Stateless
@@ -112,7 +121,12 @@ public class CommandsResource {
     private CommandFactory commandFactory;
 
     @Inject
-    private CommandCompletePostProcessor commandCompletePostProcessor;
+    @SCM(SCMType.GIT)
+    private CommandCompletePostProcessor gitCommandCompletePostProcessor;
+    
+    @Inject
+    @SCM(SCMType.MERCURIAL)
+    private CommandCompletePostProcessor hgCommandCompletePostProcessor;
 
     @Inject
     private ProjectFileSystem projectFileSystem;
@@ -260,7 +274,9 @@ public class CommandsResource {
     @Produces(MediaType.APPLICATION_JSON)
     public Response executeCommand(@PathParam("name") final String name, final ExecutionRequest executionRequest) throws Exception {
         try {
-            final CommandCompletePostProcessor postProcessor = this.commandCompletePostProcessor;
+        	
+        	CommandCompletePostProcessor postProcessor = getCommandCompletePostProcessor(executionRequest);
+
             final UserDetails userDetails;
             if (postProcessor != null) {
                 userDetails = postProcessor.preprocessRequest(name, executionRequest, request);
@@ -400,6 +416,10 @@ public class CommandsResource {
             attributeMap.put("buildName", executionRequest.getProjectName());
             attributeMap.put("namespace", executionRequest.getNamespace());
             attributeMap.put("jenkinsWorkflowFolder", projectFileSystem.getJenkinsWorkflowFolder());
+            
+            attributeMap.put("secret", request.getParameter("secret"));
+            attributeMap.put("secretNamespace", request.getParameter("secretNamespace"));
+            
             projectFileSystem.asyncCloneOrPullJenkinsWorkflows(userDetails);
         }
     }
@@ -412,11 +432,15 @@ public class CommandsResource {
     public Response validateCommand(@PathParam("name") final String name, final ExecutionRequest executionRequest) throws Exception {
         try {
             final UserDetails userDetails;
-            if (commandCompletePostProcessor != null) {
-                userDetails = commandCompletePostProcessor.preprocessRequest(name, executionRequest, request);
+            
+            CommandCompletePostProcessor postProcessor = getCommandCompletePostProcessor(executionRequest);
+            
+            if (postProcessor != null) {
+                userDetails = postProcessor.preprocessRequest(name, executionRequest, request);
             } else {
                 userDetails = null;
             }
+            
             final String namespace = executionRequest.getNamespace();
             final String projectName = executionRequest.getProjectName();
             final String resourcePath = executionRequest.getResource();
@@ -567,6 +591,32 @@ public class CommandsResource {
             final RepositoryResource projectResource = repositoriesResource.projectRepositoryResource(namespace, projectName);
             if (projectResource == null) {
                 throw new NotFoundException("Could not find git project for namespace: " + namespace + " and projectName: " + projectName);
+            } else if(projectResource.isMercurialRepository()) {
+            	
+            	LOG.info("Using Mercurial RepositoryResource");
+
+            	HgOperation<T> operation = new HgOperation<T>() {
+
+					@Override
+					public T call(File basedir, String cloneUrl, GitContext gitContext, 
+							com.aragost.javahg.Repository repo) throws Exception {
+		            	
+		            	Resource<?> selection = resourceFactory.create(basedir);
+		            	try (RestUIContext context = new RestUIContext(selection, namespace, projectName, cloneUrl)) {
+                            T answer = function.apply(context);
+                            String commitMessage = context.getCommitMessage();
+                            if (Strings.isNotBlank(commitMessage)) {
+                                projectResource.setMessage(commitMessage);
+                            }
+                            return answer;
+                        }
+					}
+				};
+                if (write) {
+                	return projectResource.hgWriteOperation(gitContext, operation);
+                } else {
+                    return projectResource.hgOperation(gitContext, operation);
+                }            	 
             } else {
                 GitOperation<T> operation = new GitOperation<T>() {
                     @Override
@@ -598,6 +648,7 @@ public class CommandsResource {
                 return function.apply(context);
             }
         }
+
     }
 
 
@@ -635,4 +686,19 @@ public class CommandsResource {
     public void setConverterFactory(ConverterFactory converterFactory) {
         this.converterFactory = converterFactory;
     }
+    
+    private CommandCompletePostProcessor getCommandCompletePostProcessor(ExecutionRequest request) {
+    	
+    	CommandCompletePostProcessor postProcessor;
+    	
+    	if(StringUtils.equals("hg", request.getInputList().get(0).get("scm"))) {
+    		postProcessor = this.hgCommandCompletePostProcessor;
+    	} else {
+    		postProcessor = this.gitCommandCompletePostProcessor;
+    	}
+    	
+    	return postProcessor;
+    	
+    }
+    
 }

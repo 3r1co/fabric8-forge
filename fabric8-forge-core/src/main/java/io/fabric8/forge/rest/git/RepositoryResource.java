@@ -15,21 +15,55 @@
  */
 package io.fabric8.forge.rest.git;
 
+import static io.fabric8.forge.rest.main.GitHelpers.configureCommand;
+import static io.fabric8.forge.rest.main.GitHelpers.disableSslCertificateChecks;
+import static io.fabric8.forge.rest.main.GitHelpers.doAddCommitAndPushFiles;
 import io.fabric8.forge.rest.git.dto.CommitDetail;
 import io.fabric8.forge.rest.git.dto.CommitInfo;
 import io.fabric8.forge.rest.git.dto.CommitTreeInfo;
 import io.fabric8.forge.rest.git.dto.DiffInfo;
 import io.fabric8.forge.rest.git.dto.FileDTO;
 import io.fabric8.forge.rest.git.dto.StatusDTO;
+import io.fabric8.forge.rest.hg.HgOperation;
+import io.fabric8.forge.rest.hg.MercurialHelper;
 import io.fabric8.forge.rest.main.GitHelpers;
 import io.fabric8.forge.rest.main.MD5Util;
 import io.fabric8.forge.rest.main.ProjectFileSystem;
 import io.fabric8.forge.rest.main.UserDetails;
+import io.fabric8.forge.rest.scm.SCMType;
 import io.fabric8.utils.Files;
 import io.fabric8.utils.IOHelpers;
 import io.fabric8.utils.Strings;
 import io.fabric8.utils.Systems;
 import io.fabric8.utils.URLUtils;
+
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.nio.file.Paths;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Date;
+import java.util.List;
+import java.util.Objects;
+import java.util.Set;
+import java.util.SortedSet;
+import java.util.TreeSet;
+import java.util.concurrent.Callable;
+
+import javax.ws.rs.Consumes;
+import javax.ws.rs.FormParam;
+import javax.ws.rs.GET;
+import javax.ws.rs.POST;
+import javax.ws.rs.Path;
+import javax.ws.rs.PathParam;
+import javax.ws.rs.QueryParam;
+import javax.ws.rs.core.MediaType;
+import javax.ws.rs.core.Response;
+
 import org.eclipse.jgit.api.AddCommand;
 import org.eclipse.jgit.api.CheckoutCommand;
 import org.eclipse.jgit.api.CommitCommand;
@@ -68,34 +102,10 @@ import org.gitective.core.filter.commit.CommitListFilter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import javax.ws.rs.Consumes;
-import javax.ws.rs.FormParam;
-import javax.ws.rs.GET;
-import javax.ws.rs.POST;
-import javax.ws.rs.Path;
-import javax.ws.rs.PathParam;
-import javax.ws.rs.QueryParam;
-import javax.ws.rs.core.MediaType;
-import javax.ws.rs.core.Response;
-import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
-import java.io.File;
-import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.Date;
-import java.util.List;
-import java.util.Objects;
-import java.util.Set;
-import java.util.SortedSet;
-import java.util.TreeSet;
-import java.util.concurrent.Callable;
-
-import static io.fabric8.forge.rest.main.GitHelpers.configureCommand;
-import static io.fabric8.forge.rest.main.GitHelpers.disableSslCertificateChecks;
-import static io.fabric8.forge.rest.main.GitHelpers.doAddCommitAndPushFiles;
+import com.aragost.javahg.commands.Branch;
+import com.aragost.javahg.commands.BranchesCommand;
+import com.aragost.javahg.commands.StatusCommand;
+import com.google.common.collect.Lists;
 
 /**
  */
@@ -116,6 +126,8 @@ public class RepositoryResource {
     private PersonIdent personIdent;
     private String message;
     private String objectId;
+    
+    private SCMType scmType = SCMType.GIT;
 
     public RepositoryResource(File basedir, File gitFolder, UserDetails userDetails, String origin, String branch, String remoteRepository, GitLockManager lockManager, ProjectFileSystem projectFileSystem, String cloneUrl, String objectId) throws IOException, GitAPIException {
         this.basedir = basedir;
@@ -156,25 +168,56 @@ public class RepositoryResource {
     public String getObjectId() {
         return objectId;
     }
+    
+    public boolean isMercurialRepository() {
+    	return SCMType.MERCURIAL.equals(this.scmType);
+    }
 
     @GET
     @Path("content/{path:.*}")
     public Response fileDetails(final @PathParam("path") String path) throws Exception {
-        return gitReadOperation(new GitOperation<Response>() {
-            @Override
-            public Response call(Git git, GitContext context) throws Exception {
-                return doFileDetails(git, path);
-            }
-        });
+    	if(isMercurialRepository()) {
+    		
+        	return hgOperation(new HgOperation<Response>() {
+
+				@Override
+				public Response call(File basedir, String cloneUrl, GitContext context,
+						com.aragost.javahg.Repository repo) throws Exception {
+					return doFileDetails(null, path);
+				}
+    		});
+        	
+    	} else {
+    		
+            return gitReadOperation(new GitOperation<Response>() {
+                @Override
+                public Response call(Git git, GitContext context) throws Exception {
+                    return doFileDetails(git, path);
+                }
+            });
+            
+    	}
     }
 
     protected Response doFileDetails(Git git, String path) {
         if (Strings.isNotBlank(objectId)) {
-            Repository r = git.getRepository();
-            String blobPath = trimLeadingSlash(path);
-            String content = BlobUtils.getContent(r, objectId, blobPath);
+        	
+        	String content = "";
+        	String blobPath = trimLeadingSlash(path);
+        	if(isMercurialRepository()) {
+        		Repository r = git.getRepository();
+                content = BlobUtils.getContent(r, objectId, blobPath);
+        	} else {
+        		try {
+    				content = new String(java.nio.file.Files.readAllBytes(Paths.get(blobPath)));
+    			} catch (IOException e) {
+    				content = "Could not read File";
+    			}
+        	}
+            
             FileDTO answer = FileDTO.createFileDTO(blobPath, objectId, content);
             return Response.ok(answer).build();
+            
         } else {
             final File file = getRelativeFile(path);
             if (LOG.isDebugEnabled()) {
@@ -336,12 +379,18 @@ public class RepositoryResource {
     @GET
     @Path("commitDetail/{commitId}")
     public CommitDetail commitDetail(final @PathParam("commitId") String commitId) throws Exception {
+    	
+    	if(isMercurialRepository()) {
+    		return new CommitDetail(new CommitInfo(commitId, commitId, commitId, commitId, commitId, null, false, commitId), Lists.newArrayList());
+    	}
+    	
         return gitReadOperation(new GitOperation<CommitDetail>() {
             @Override
             public CommitDetail call(Git git, GitContext context) throws Exception {
                 return doCommitDetail(git, commitId);
             }
         });
+        
     }
 
     protected CommitDetail doCommitDetail(Git git, String commitId) throws IOException {
@@ -502,12 +551,25 @@ public class RepositoryResource {
     @GET
     @Path("history/{commitId}/{path:.*}")
     public List<CommitInfo> history(@PathParam("commitId") final String objectId, @PathParam("path") final String pathOrBlobPath, @QueryParam("limit") final int limit) throws Exception {
-        return gitReadOperation(new GitOperation<List<CommitInfo>>() {
-            @Override
-            public List<CommitInfo> call(Git git, GitContext context) throws Exception {
-                return doHistory(git, objectId, pathOrBlobPath, limit);
-            }
-        });
+        if(isMercurialRepository()) {
+        	return hgOperation(new HgOperation<List<CommitInfo>>() {
+
+				@Override
+				public List<CommitInfo> call(File basedir, String cloneUrl,
+						GitContext context, com.aragost.javahg.Repository repo)
+						throws Exception {
+					return MercurialHelper.getHistory(repo, limit);
+				}
+			});
+        	
+        } else {
+        	return gitReadOperation(new GitOperation<List<CommitInfo>>() {
+                @Override
+                public List<CommitInfo> call(Git git, GitContext context) throws Exception {
+                    return doHistory(git, objectId, pathOrBlobPath, limit);
+                }
+            });
+        }
     }
 
     protected List<CommitInfo> doHistory(Git git, String objectId, String pathOrBlobPath, int limit) {
@@ -705,12 +767,31 @@ public class RepositoryResource {
     @GET
     @Path("listBranches")
     public List<String> listBranches() throws Exception {
-        return gitReadOperation(new GitOperation<List<String>>() {
-            @Override
-            public List<String> call(Git git, GitContext context) throws Exception {
-                return doListBranches(git);
-            }
-        });
+    	if(isMercurialRepository()) {
+    		return hgOperation(new HgOperation<List<String>>() {
+
+				@Override
+				public List<String> call(File basedir,
+						String cloneUrl, GitContext context,
+						com.aragost.javahg.Repository repo) throws Exception {
+					List<String> branchList = Lists.newArrayList();
+					List<Branch> branches = BranchesCommand.on(repo).active().execute();
+					for(Branch branch : branches) {
+						branchList.add(branch.getName());
+					}
+					return branchList;
+				}
+    			
+			});
+    	} else {
+            return gitReadOperation(new GitOperation<List<String>>() {
+                @Override
+                public List<String> call(Git git, GitContext context) throws Exception {
+                    return doListBranches(git);
+                }
+            });
+    	}
+
     }
 
     protected List<String> doListBranches(Git git) throws Exception {
@@ -747,6 +828,41 @@ public class RepositoryResource {
         context.setRequireCommit(true);
         context.setRequirePush(true);
         return gitOperation(context, operation);
+    }
+    
+    public <T> T hgOperation(final HgOperation<T> operation) throws Exception {
+    	return hgOperation(new GitContext(), operation);
+    }
+    
+    public <T> T hgWriteOperation(final GitContext context, final HgOperation<T> operation) throws Exception {
+        context.setRequireCommit(true);
+        context.setRequirePush(true);
+        return hgOperation(context, operation);
+    }
+    
+    public <T> T hgOperation(final GitContext context, final HgOperation<T> operation) throws Exception {
+    	return lockManager.withLock(gitFolder, new Callable<T>() {
+    		
+			@Override
+			public T call() throws Exception {
+				
+				com.aragost.javahg.Repository repo = projectFileSystem.cloneMercurialRepoIfNotExist(userDetails, basedir, cloneUrl);
+
+				/*
+				if (context.isRequirePull()) {
+					MercurialHelper.doPull(repo);
+                }
+				*/
+				
+				T result = operation.call(basedir, cloneUrl, context, repo);
+				
+				if (context.isRequireCommit() && hasMercurialChanges(repo)) {
+                    MercurialHelper.doAddCommitAndPushFiles(repo);		
+				}
+						
+				return result;
+			}
+    	});
     }
 
     protected <T> T gitOperation(final GitContext context, final GitOperation<T> operation) throws Exception {
@@ -814,6 +930,10 @@ public class RepositoryResource {
     protected boolean hasGitChanges(Git git) throws GitAPIException {
         Status status = git.status().call();
         return anySetsNotEmpty(status.getAdded(), status.getChanged(), status.getModified(), status.getRemoved(), status.getUntracked());
+    }
+    
+    protected boolean hasMercurialChanges(com.aragost.javahg.Repository repo) {
+    	return StatusCommand.on(repo).lines().size() > 0;
     }
 
     protected boolean anySetsNotEmpty(Set<String>... sets) {
@@ -1051,8 +1171,8 @@ public class RepositoryResource {
         }
         FileDTO answer = FileDTO.createFileDTO(file, relativePath, includeContent, "", false);
         String path = answer.getPath();
-        if (path.equals(".git")) {
-            // lets ignore the git folder!
+        if (path.equals(".git") || path.equals(".hg")) {
+            // lets ignore the git or mercurial folder!
             return null;
         }
         // TODO use the path to generate the links...
@@ -1085,4 +1205,12 @@ public class RepositoryResource {
     public String getCloneUrl() {
         return cloneUrl;
     }
+
+	public SCMType getScmType() {
+		return scmType;
+	}
+
+	public void setScmType(SCMType scmType) {
+		this.scmType = scmType;
+	}
 }

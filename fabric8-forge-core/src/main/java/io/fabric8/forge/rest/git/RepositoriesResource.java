@@ -19,6 +19,7 @@ import io.fabric8.forge.rest.main.GitUserHelper;
 import io.fabric8.forge.rest.main.ProjectFileSystem;
 import io.fabric8.forge.rest.main.RepositoryCache;
 import io.fabric8.forge.rest.main.UserDetails;
+import io.fabric8.forge.rest.scm.SCMType;
 import io.fabric8.kubernetes.api.model.LocalObjectReference;
 import io.fabric8.kubernetes.api.model.Secret;
 import io.fabric8.kubernetes.client.KubernetesClient;
@@ -32,6 +33,7 @@ import io.fabric8.repo.git.RepositoryDTO;
 import io.fabric8.utils.Base64Encoder;
 import io.fabric8.utils.Files;
 import io.fabric8.utils.Strings;
+
 import org.eclipse.jgit.api.errors.GitAPIException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -46,6 +48,7 @@ import javax.ws.rs.PathParam;
 import javax.ws.rs.Produces;
 import javax.ws.rs.core.Context;
 import javax.ws.rs.core.MediaType;
+
 import java.io.File;
 import java.io.IOException;
 import java.util.List;
@@ -124,9 +127,19 @@ public class RepositoriesResource {
         //File projectFolder = projectFileSystem.cloneOrPullProjectFolder(userId, repositoryName, userDetails);
         File projectFolder = projectFileSystem.getUserProjectFolder(userId, repositoryName);
         String cloneUrl = projectFileSystem.getCloneUrl(userId, repositoryName, userDetails);
-        File gitFolder = new File(projectFolder, ".git");
         String remoteRepository = userId + "/" + repositoryName;
-        RepositoryResource resource = new RepositoryResource(projectFolder, gitFolder, userDetails, origin, branch, remoteRepository, lockManager, projectFileSystem, cloneUrl, objectId);
+        
+        RepositoryResource resource;
+        if(cloneUrl.endsWith(".git")) {
+        	LOG.debug("Cloning GIT Repository: " + cloneUrl);
+        	 File gitFolder = new File(projectFolder, ".git");
+        	 resource = new RepositoryResource(projectFolder, gitFolder, userDetails, origin, branch, remoteRepository, lockManager, projectFileSystem, cloneUrl, objectId);
+        } else {
+        	LOG.debug("Cloning Mercurial Repository: " + cloneUrl);
+        	resource = new RepositoryResource(projectFolder, projectFolder, userDetails, origin, branch, remoteRepository, lockManager, projectFileSystem, cloneUrl, objectId);
+        	resource.setScmType(SCMType.MERCURIAL);
+        }
+       
         try {
             String message = request.getParameter("message");
             if (Strings.isNotBlank(message)) {
@@ -185,13 +198,21 @@ public class RepositoriesResource {
                 sourceSecretName = sourceSecret.getName();
             }
         }
+        
         File projectFolder = projectFileSystem.getNamespaceProjectFolder(namespace, projectId, secretNamespace, sourceSecretName);
 
-
         String cloneUrl = uri;
-        File gitFolder = new File(projectFolder, ".git");
-        LOG.debug("Cloning " + cloneUrl);
-        RepositoryResource resource = new RepositoryResource(projectFolder, gitFolder, userDetails, origin, branch, remoteRepository, lockManager, projectFileSystem, cloneUrl, objectId);
+        RepositoryResource resource;
+        if(cloneUrl.endsWith(".git")) {
+        	LOG.debug("Cloning GIT Repository: " + cloneUrl);
+        	 File gitFolder = new File(projectFolder, ".git");
+        	 resource = new RepositoryResource(projectFolder, gitFolder, userDetails, origin, branch, remoteRepository, lockManager, projectFileSystem, cloneUrl, objectId);
+        } else {
+        	LOG.debug("Cloning Mercurial Repository: " + cloneUrl);
+        	resource = new RepositoryResource(projectFolder, projectFolder, userDetails, origin, branch, remoteRepository, lockManager, projectFileSystem, cloneUrl, objectId);
+        	resource.setScmType(SCMType.MERCURIAL);
+        }
+        
         if (sourceSecretName != null) {
             try {
                 Secret secret = osClient.secrets().inNamespace(secretNamespace).withName(sourceSecretName).get();
@@ -235,7 +256,9 @@ public class RepositoriesResource {
         } catch (Exception e) {
             LOG.warn("failed to load message parameter: " + e, e);
         }
+
         return resource;
+        
     }
 
     protected String decodeSecretData(String text) {

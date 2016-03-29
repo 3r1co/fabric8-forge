@@ -142,7 +142,18 @@
       <groupId>org.slf4j</groupId>
       <artifactId>jul-to-slf4j</artifactId>
     </dependency>
-
+    
+    <dependency>
+		<groupId>org.apache.commons</groupId>
+		<artifactId>commons-lang3</artifactId>
+		<version>3.4</version>
+	</dependency>
+	
+	<dependency>
+		<groupId>com.aragost.javahg</groupId>
+		<artifactId>javahg</artifactId>
+		<version>0.8-SNAPSHOT</version>
+	</dependency>
 
     <!-- testing -->
     <dependency>

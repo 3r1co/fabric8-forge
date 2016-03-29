@@ -19,6 +19,7 @@ import io.fabric8.repo.git.GitRepoClient;
 import io.fabric8.repo.git.RepositoryDTO;
 import io.fabric8.utils.Files;
 import io.fabric8.utils.Strings;
+
 import org.apache.deltaspike.core.api.config.ConfigProperty;
 import org.eclipse.jgit.api.CloneCommand;
 import org.eclipse.jgit.api.Git;
@@ -32,10 +33,17 @@ import org.eclipse.jgit.transport.CredentialsProvider;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import com.aragost.javahg.BaseRepository;
+import com.aragost.javahg.RepositoryConfiguration;
+
 import javax.inject.Inject;
 import javax.inject.Singleton;
 import javax.ws.rs.NotFoundException;
+
+import java.io.BufferedWriter;
 import java.io.File;
+import java.io.FileWriter;
+import java.io.IOException;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -189,6 +197,84 @@ public class ProjectFileSystem {
 
         }
         return projectFolder;
+    }
+    
+    public com.aragost.javahg.Repository cloneMercurialRepoIfNotExist(UserDetails userDetails, File projectFolder, String cloneUrl) {
+    	
+    	LOG.info("Cloning Mercurial repo " + cloneUrl + " into directory " + projectFolder.getAbsolutePath());
+    	
+    	File hgFolder = new File(projectFolder, ".hg");
+    	
+    	File config = ProjectFileSystem.getMercurialConfiguration(userDetails, cloneUrl);
+    	RepositoryConfiguration configuration = RepositoryConfiguration.DEFAULT;
+    	configuration.setHgrcPath(config.getAbsolutePath());
+    	
+    	if (Files.isDirectory(hgFolder)) {
+    		LOG.info("Mercurial repo " + cloneUrl + " already existed at directory " + hgFolder.getAbsolutePath());
+    		return com.aragost.javahg.Repository.open(configuration, projectFolder);
+    	}
+
+    	BaseRepository repository;
+    	
+    	try{
+    		
+    		repository = com.aragost.javahg.Repository.clone(
+    				configuration,
+    				projectFolder, 
+    				cloneUrl);
+    		
+    		LOG.info("Created Repository at");
+        	LOG.info(repository.getDirectory().getAbsolutePath());
+    		
+    	}catch(Exception e) {
+    		LOG.error("Error creating Mercurial Repository: ", e);
+    		throw new RuntimeException("Failed to checkout Mercurial repo " + cloneUrl + " due: " + e.getMessage());
+    	}
+    	
+    	try {
+    		config.delete();
+    	} catch (Exception e) {
+    		LOG.info("Could not delete Mercurial config: ", e);
+    	}
+
+    	return repository;
+    }
+    
+    public static File getMercurialConfiguration(UserDetails userDetails, String cloneUrl) {
+    	
+    	File config = null;
+    	
+    	try {
+    		
+    		config = File.createTempFile("auth", "hgrc");
+    		Files.copy(new File("/etc/mercurial/hgrc"), config);
+    		
+    		StringBuilder sb = new StringBuilder();
+    		sb.append(System.getProperty("line.separator"));
+    		sb.append("[auth]");
+    		sb.append(System.getProperty("line.separator"));
+    		sb.append("repo.prefix = ");
+    		sb.append(cloneUrl);
+    		sb.append(System.getProperty("line.separator"));
+    		sb.append("repo.username = ");
+    		sb.append(userDetails.getUser());
+    		sb.append(System.getProperty("line.separator"));
+    		sb.append("repo.password = ");
+    		sb.append(userDetails.getPassword());
+    		sb.append(System.getProperty("line.separator"));
+			
+			FileWriter fileWritter = new FileWriter(config,true);
+	        BufferedWriter bufferWritter = new BufferedWriter(fileWritter);
+	        bufferWritter.write(sb.toString());
+	        bufferWritter.close();
+			
+		} catch (IOException e) {
+			LOG.error("Error creating Mercurial Configuration: ", e);
+			throw new RuntimeException("Error creating Mercurial Configuration: " + e.getMessage());
+		}
+    	
+    	return config;
+    	
     }
 
     public static void cloneRepo(File projectFolder, String cloneUrl, CredentialsProvider credentialsProvider, final File sshPrivateKey, final File sshPublicKey, String remote) {

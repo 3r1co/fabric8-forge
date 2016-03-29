@@ -24,18 +24,24 @@ import io.fabric8.forge.devops.dto.PipelineDTO;
 import io.fabric8.forge.devops.dto.PipelineMetadata;
 import io.fabric8.forge.devops.dto.ProjectOverviewDTO;
 import io.fabric8.kubernetes.api.KubernetesHelper;
+import io.fabric8.kubernetes.api.model.Secret;
 import io.fabric8.letschat.LetsChatClient;
 import io.fabric8.letschat.LetsChatKubernetes;
 import io.fabric8.letschat.RoomDTO;
+import io.fabric8.openshift.client.OpenShiftClient;
 import io.fabric8.taiga.ProjectDTO;
 import io.fabric8.taiga.TaigaClient;
 import io.fabric8.taiga.TaigaKubernetes;
+import io.fabric8.utils.Base64Encoder;
 import io.fabric8.utils.Files;
 import io.fabric8.utils.Filter;
 import io.fabric8.utils.GitHelpers;
 import io.fabric8.utils.IOHelpers;
 import io.fabric8.utils.Objects;
 import io.fabric8.utils.Strings;
+
+import org.apache.commons.lang.ArrayUtils;
+import org.apache.commons.lang.StringUtils;
 import org.apache.maven.model.Model;
 import org.jboss.forge.addon.convert.Converter;
 import org.jboss.forge.addon.maven.projects.MavenFacet;
@@ -62,10 +68,12 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import javax.inject.Inject;
+
 import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -82,6 +90,9 @@ public class DevOpsEditStep extends AbstractDevOpsCommand implements UIWizardSte
     private static final String DEFAULT_MAVEN_FLOW = "workflows/maven/CanaryReleaseStageAndApprovePromote.groovy";
 
     public static final String JENKINSFILE = "Jenkinsfile";
+    
+    public static final String USERNAME_DATA_KEY = "username";
+    public static final String PASSWORD_DATA_KEY = "password";
 
     private String jenkinsFilePrefix = "workflows/";
 
@@ -293,12 +304,18 @@ public class DevOpsEditStep extends AbstractDevOpsCommand implements UIWizardSte
         Object object = attributeMap.get(Project.class);
         String user = getStringAttribute(attributeMap, "gitUser");
         String named = getStringAttribute(attributeMap, "projectName");
-
-        boolean isMercurialProject = Boolean.valueOf(getStringAttribute(attributeMap, "hg"));
         
         File basedir = CommandHelpers.getBaseDir(project);
         if (basedir == null && configFile != null) {
             basedir = configFile.getParentFile();
+        }
+        
+        if(isMercurial(configFile)) {
+        	String secretNamespace = getStringAttribute(attributeMap, "secretNamespace");
+        	String secret = getStringAttribute(attributeMap, "secret");
+        	Map<String, String> credentials = getCredentials(secretNamespace, secret);
+        	user = credentials.get(USERNAME_DATA_KEY);
+        	attributeMap.put("gitPassword", credentials.get(PASSWORD_DATA_KEY));
         }
 
         if (object instanceof Project) {
@@ -394,7 +411,13 @@ public class DevOpsEditStep extends AbstractDevOpsCommand implements UIWizardSte
                     if (Strings.isNullOrBlank(flowText))  {
                         LOG.warn("Cannot copy the pipeline to the project as no pipeline text could be loaded!");
                     } else {
-                        flowText = Strings.replaceAllWithoutRegex(flowText, "GIT_URL", "'" + gitUrl + "'");
+                    	if(isMercurial(configFile)) {
+                    		flowText = Strings.replaceAllWithoutRegex(flowText, "git GIT_URL", "checkout scm: [$class: 'MercurialSCM', source: repoUrl , clean: true, credentialsId: credentialId], poll: false");
+                    		flowText = addMercurialParameters(flowText);
+                    	} else {
+                    		flowText = Strings.replaceAllWithoutRegex(flowText, "GIT_URL", "'" + gitUrl + "'");
+                    	}
+                        
                         File newFile = new File(basedir, ProjectConfigs.LOCAL_FLOW_FILE_NAME);
                         Files.writeToFile(newFile, flowText.getBytes());
                         LOG.info("Written pipeline to " + newFile);
@@ -416,11 +439,12 @@ public class DevOpsEditStep extends AbstractDevOpsCommand implements UIWizardSte
         connector.setBasedir(basedir);
         connector.setGitUrl(gitUrl);
         connector.setRepoName(named);
+        connector.setScm((isMercurial(configFile)) ? DevOpsConnector.SCM.HG : DevOpsConnector.SCM.GIT);
 
         connector.setRegisterWebHooks(true);
 
         // lets not trigger the jenkins webhook yet as the git push should trigger the build
-        connector.setTriggerJenkinsJob(false);
+        connector.setTriggerJenkinsJob(isMercurial(configFile));
 
         LOG.info("Using connector: " + connector);
 
@@ -668,6 +692,58 @@ public class DevOpsEditStep extends AbstractDevOpsCommand implements UIWizardSte
 
     public void setTaiga(TaigaClient taiga) {
         this.taiga = taiga;
+    }
+    
+    private Map<String, String> getCredentials(String secretNamespace, String sourceSecretName) {
+    	
+    	Map<String, String> result = new HashMap<String, String>();
+    	
+    	OpenShiftClient osClient = getKubernetes().adapt(OpenShiftClient.class).inNamespace(namespace);
+    	Secret secret = osClient.secrets().inNamespace(secretNamespace).withName(sourceSecretName).get();
+    	if (secret != null) {
+    		Map<String, String> data = secret.getData();
+            result.put(USERNAME_DATA_KEY, decodeSecretData(data.get(USERNAME_DATA_KEY)));
+            result.put(PASSWORD_DATA_KEY, decodeSecretData(data.get(PASSWORD_DATA_KEY)));             
+    	}
+    	
+    	return result;
+    }
+    
+    private boolean isMercurial(File configFile) {
+    	return ArrayUtils.contains(configFile.getParentFile().list(), ".hg");
+    }
+    
+    private String decodeSecretData(String text) {
+        if (Strings.isNotBlank(text)) {
+            return Base64Encoder.decode(text);
+        } else {
+            return text;
+        }
+    }
+    
+    private String addMercurialParameters(String flow) {
+    	String mercurialParameters = 
+    			"\n\ndef repoUrl = \"\"\n" +
+    			"try {\n" +
+    			"  repoUrl = REPO_URL\n" +
+    			"} catch (Throwable e) {\n" +
+    			"  e.printStackTrace()\n" +
+    			"  return\n" +
+    			"}\n" +
+    			"\n" +
+    			"def credentialId = \"\"\n" +
+    			"try {\n" +
+    			"  credentialId = CREDENTIAL_ID\n" +
+    			"} catch (Throwable e) {\n" +
+    			"  e.printStackTrace()\n" +
+    			"  return\n" +
+    			"}\n\n";
+    	
+    	StringBuilder sb = new StringBuilder();
+    	sb.append(flow.substring(0, flow.indexOf("\n")));
+    	sb.append(mercurialParameters);
+    	sb.append(flow.substring(flow.indexOf("\n") + 1, flow.lastIndexOf("}") +1 ));
+    	return sb.toString();
     }
 
 }
